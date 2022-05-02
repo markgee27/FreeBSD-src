@@ -1,0 +1,216 @@
+diff -u b/sys/dev/virtio/pci/virtio_pci.c b/sys/dev/virtio/pci/virtio_pci.c
+--- b/sys/dev/virtio/pci/virtio_pci.c
++++ b/sys/dev/virtio/pci/virtio_pci.c
+@@ -47,6 +47,7 @@
+ #include <dev/virtio/virtio.h>
+ #include <dev/virtio/virtqueue.h>
+ #include <dev/virtio/pci/virtio_pci.h>
++#include <dev/pci/pcivar.h>
+ 
+ #include "virtio_bus_if.h"
+ #include "virtio_if.h"
+@@ -255,12 +256,46 @@
+ 	return (BUS_PROBE_DEFAULT);
+ }
+ 
++static int vtget_msix_bar(device_t dev)
++{
++    uint32_t status;
++    uint8_t ptr;
++    int bar = -1;
++
++    status = pci_read_config(dev, PCIR_STATUS, 2);
++    if (!(status & PCIM_STATUS_CAPPRESENT)) {
++	printf("status error\n");
++        return bar;
++    }
++
++    /*
++     * Determine the start pointer of the capabilities list.
++     */
++    ptr = PCIR_CAP_PTR;
++    ptr = pci_read_config(dev, ptr, 1);
++
++    /*
++     * Traverse the capabilities list.
++     */
++    while (ptr != 0) {
++        if (pci_read_config(dev, ptr + PCICAP_ID, 1) == PCIY_MSIX) {
++	    bar = 0;
++            break;
++        }
++        ptr = pci_read_config(dev, ptr + PCICAP_NEXTPTR, 1);
++    }
++    printf("msix info %d\n", pci_read_config(dev, ptr+4, 1));
++    if (bar == 0)
++        bar = pci_read_config(dev, ptr + 4, 1) & 7;
++    return bar;
++}
++
+ static int
+ vtpci_attach(device_t dev)
+ {
+ 	struct vtpci_softc *sc;
+ 	device_t child;
+-	int rid;
++	int rid, msixbar = -1,bar0 = -1, sourcetype = 0;
+ 
+ 	sc = device_get_softc(dev);
+ 	sc->vtpci_dev = dev;
+@@ -268,7 +303,14 @@
+ 	pci_enable_busmaster(dev);
+ 
+ 	rid = PCIR_BAR(0);
+-	sc->vtpci_res = bus_alloc_resource_any(dev, SYS_RES_IOPORT, &rid,
++	bar0 = pci_read_config(dev, 0x10, 1);
++        printf("bar 0 %d\n", bar0);
++	if (bar0 & 1) {
++	    sourcetype = SYS_RES_IOPORT;
++	} else {
++	    sourcetype = SYS_RES_MEMORY;
++	}
++	sc->vtpci_res = bus_alloc_resource_any(dev, sourcetype, &rid,
+ 	    RF_ACTIVE);
+ 	if (sc->vtpci_res == NULL) {
+ 		device_printf(dev, "cannot map I/O space\n");
+@@ -280,8 +322,10 @@
+ 	if (pci_find_cap(dev, PCIY_MSI, NULL) != 0)
+ 		sc->vtpci_flags |= VTPCI_FLAG_NO_MSI;
+ 
+-	if (pci_find_cap(dev, PCIY_MSIX, NULL) == 0) {
+-		rid = PCIR_BAR(1);
++	msixbar = vtget_msix_bar(dev);
++
++	if (msixbar > 0) {
++		rid = PCIR_BAR(msixbar);
+ 		sc->vtpci_msix_res = bus_alloc_resource_any(dev,
+ 		    SYS_RES_MEMORY, &rid, RF_ACTIVE);
+ 	}
+@@ -578,6 +622,10 @@
+ 			device_printf(dev, "using per VQ MSIX interrupts\n");
+ 	}
+ 
++	if (!(vtpci_get_status(dev) & VIRTIO_CONFIG_STATUS_DRIVER_OK)) {
++	    vtpci_set_status(dev, VIRTIO_CONFIG_STATUS_DRIVER_OK);
++	}
++
+ 	return (0);
+ }
+ 
+@@ -607,8 +655,9 @@
+ 	 * This will need to be rethought when we want to support migration.
+ 	 */
+ 
+-	if (vtpci_get_status(dev) != VIRTIO_CONFIG_STATUS_RESET)
++	if (vtpci_get_status(dev) != VIRTIO_CONFIG_STATUS_RESET) {
+ 		vtpci_stop(dev);
++	}
+ 
+ 	/*
+ 	 * Quickly drive the status through ACK and DRIVER. The device
+@@ -631,14 +680,19 @@
+ 			return (error);
+ 	}
+ 
++	if (!(vtpci_get_status(dev) & VIRTIO_CONFIG_STATUS_DRIVER_OK)) {
++	    vtpci_set_status(dev, VIRTIO_CONFIG_STATUS_DRIVER_OK);
++	}
++
+ 	return (0);
+ }
+ 
+ static void
+ vtpci_reinit_complete(device_t dev)
+ {
+-
+-	vtpci_set_status(dev, VIRTIO_CONFIG_STATUS_DRIVER_OK);
++	if (!(vtpci_get_status(dev) & VIRTIO_CONFIG_STATUS_DRIVER_OK)) {
++	    vtpci_set_status(dev, VIRTIO_CONFIG_STATUS_DRIVER_OK);
++	}
+ }
+ 
+ static void
+@@ -766,7 +820,9 @@
+ 		/* Reset status for future attempt. */
+ 		vtpci_set_status(dev, VIRTIO_CONFIG_STATUS_ACK);
+ 	} else {
+-		vtpci_set_status(dev, VIRTIO_CONFIG_STATUS_DRIVER_OK);
++	    if (!(vtpci_get_status(dev) & VIRTIO_CONFIG_STATUS_DRIVER_OK)) {
++	    	vtpci_set_status(dev, VIRTIO_CONFIG_STATUS_DRIVER_OK);
++	    }
+ 		VIRTIO_ATTACH_COMPLETED(child);
+ 	}
+ }
+@@ -1065,6 +1121,7 @@
+ {
+ 	struct vtpci_interrupt *intr, *tintr;
+ 	int idx, offset, error;
++	printf("set host msix vectors begin\n");
+ 
+ 	intr = &sc->vtpci_device_interrupt;
+ 	offset = VIRTIO_MSI_CONFIG_VECTOR;
+@@ -1096,6 +1153,7 @@
+ 		    (sc->vtpci_flags & VTPCI_FLAG_SHARED_MSIX) == 0)
+ 			intr++;
+ 	}
++	printf("set host msix vectors end\n");
+ 
+ 	return (error);
+ }
+only in patch2:
+unchanged:
+--- a/sys/dev/virtio/block/virtio_blk.c
++++ b/sys/dev/virtio/block/virtio_blk.c
+@@ -322,14 +322,14 @@ vtblk_attach(device_t dev)
+ 	 * segments are coalesced. For now, just make sure it's larger
+ 	 * than the maximum supported transfer size.
+ 	 */
+-	if (virtio_with_feature(dev, VIRTIO_BLK_F_SIZE_MAX)) {
+-		if (blkcfg.size_max < MAXPHYS) {
+-			error = ENOTSUP;
+-			device_printf(dev, "host requires unsupported "
+-			    "maximum segment size feature\n");
+-			goto fail;
+-		}
+-	}
++	//if (virtio_with_feature(dev, VIRTIO_BLK_F_SIZE_MAX)) {
++	//	if (blkcfg.size_max < MAXPHYS) {
++	//		error = ENOTSUP;
++	//		device_printf(dev, "host requires unsupported "
++	//		    "maximum segment size feature\n");
++	//		goto fail;
++	//	}
++	//}
+ 
+ 	sc->vtblk_max_nsegs = vtblk_maximum_segments(sc, &blkcfg);
+ 	if (sc->vtblk_max_nsegs <= VTBLK_MIN_SEGMENTS) {
+only in patch2:
+unchanged:
+--- a/sys/dev/virtio/network/if_vtnet.c
++++ b/sys/dev/virtio/network/if_vtnet.c
+@@ -407,12 +407,6 @@ vtnet_attach(device_t dev)
+ 		goto fail;
+ 	}
+ 
+-	error = vtnet_setup_interface(sc);
+-	if (error) {
+-		device_printf(dev, "cannot setup interface\n");
+-		goto fail;
+-	}
+-
+ 	error = virtio_setup_intr(dev, INTR_TYPE_NET);
+ 	if (error) {
+ 		device_printf(dev, "cannot setup virtqueue interrupts\n");
+@@ -421,6 +415,12 @@ vtnet_attach(device_t dev)
+ 		goto fail;
+ 	}
+ 
++	error = vtnet_setup_interface(sc);
++	if (error) {
++		device_printf(dev, "cannot setup interface\n");
++		goto fail;
++	}
++
+ #ifdef DEV_NETMAP
+ 	vtnet_netmap_attach(sc);
+ #endif /* DEV_NETMAP */

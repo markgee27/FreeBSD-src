@@ -325,14 +325,14 @@ vtblk_attach(device_t dev)
 	 * segments are coalesced. For now, just make sure it's larger
 	 * than the maximum supported transfer size.
 	 */
-	//if (virtio_with_feature(dev, VIRTIO_BLK_F_SIZE_MAX)) {
-	//	if (blkcfg.size_max < MAXPHYS) {
-	//		error = ENOTSUP;
-	//		device_printf(dev, "host requires unsupported "
-	//		    "maximum segment size feature\n");
-	//		goto fail;
-	//	}
-	//}
+	if (virtio_with_feature(dev, VIRTIO_BLK_F_SIZE_MAX)) {
+		if (blkcfg.size_max < MAXPHYS) {
+			error = ENOTSUP;
+			device_printf(dev, "host requires unsupported "
+			    "maximum segment size feature\n");
+			goto fail;
+		}
+	}
 
 	sc->vtblk_max_nsegs = vtblk_maximum_segments(sc, &blkcfg);
 	if (sc->vtblk_max_nsegs <= VTBLK_MIN_SEGMENTS) {
