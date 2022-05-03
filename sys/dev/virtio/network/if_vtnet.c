@@ -407,17 +407,17 @@ vtnet_attach(device_t dev)
 		goto fail;
 	}
 
-	error = vtnet_setup_interface(sc);
-	if (error) {
-		device_printf(dev, "cannot setup interface\n");
-		goto fail;
-	}
-
 	error = virtio_setup_intr(dev, INTR_TYPE_NET);
 	if (error) {
 		device_printf(dev, "cannot setup virtqueue interrupts\n");
 		/* BMV: This will crash if during boot! */
 		ether_ifdetach(sc->vtnet_ifp);
+		goto fail;
+	}
+
+	error = vtnet_setup_interface(sc);
+	if (error) {
+		device_printf(dev, "cannot setup interface\n");
 		goto fail;
 	}
 
